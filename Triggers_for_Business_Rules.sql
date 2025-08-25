@@ -5,6 +5,8 @@ select * from holding;
 
 DELIMITER //
 DROP TRIGGER IF EXISTS br1;
+
+//
 CREATE TRIGGER br1
   BEFORE INSERT ON Borrowedby
   FOR EACH ROW 
@@ -43,6 +45,7 @@ select * from member;
 select * from Borrowedby;
 DELIMITER //
 DROP TRIGGER IF EXISTS br2;
+//
 CREATE TRIGGER br2
   BEFORE INSERT ON Borrowedby
   FOR EACH ROW
@@ -73,6 +76,7 @@ VALUES ('3', '5','6','2020-01-01',NULL,'2020-02-01');
 
 DELIMITER //
 DROP TRIGGER IF EXISTS br3;
+//
 CREATE TRIGGER br3
   BEFORE INSERT ON Borrowedby
   FOR EACH ROW
@@ -106,7 +110,7 @@ VALUES ('1', '2','2','2020-08-30',NULL,'2020-09-30');
 # BR4. A member can borrow up to 5 items for 3 weeks (i.e., 21 days).
 DROP TRIGGER IF EXISTS br4;
 DELIMITER //
-
+//
 CREATE TRIGGER br4
   BEFORE INSERT ON Borrowedby
   FOR EACH ROW
@@ -168,6 +172,7 @@ VALUES ('3', '1','5','2020-01-11',NULL,'2020-01-30');
 
 DELIMITER //
 DROP TRIGGER IF EXISTS br5;
+//
 CREATE TRIGGER br5
   BEFORE INSERT ON Borrowedby
   FOR EACH ROW
@@ -328,4 +333,200 @@ WHERE BookIssueID = 11 and MemberID=3;
 select * from member;
 
 
+
+/*BR8. When a suspended member clears their fine (i.e, paid all the outstanding fees) and has no or has
+ returned all overdue items, reset the member’s membership status to “REGULAR”. */
+DELIMITER //
+DROP TRIGGER IF EXISTS br8_borrowedby;
+//
+CREATE TRIGGER br8_borrowedby
+AFTER UPDATE ON Borrowedby
+FOR EACH ROW
+BEGIN
+	DECLARE v_total_fine DECIMAL(10, 2);
+    DECLARE v_overdue_items INT;
+    DECLARE v_status varchar(50);
+	SELECT MemberStatus  INTO v_status
+    FROM Member 
+    WHERE MemberID = NEW.MemberID;
+  IF v_status = 'SUSPENDED' THEN     
+    SELECT SUM(FineFee) INTO v_total_fine
+    FROM Member
+    WHERE MemberID = NEW.MemberID;    
+    SELECT COUNT(*) INTO v_overdue_items
+    FROM Borrowedby
+    WHERE MemberID = NEW.MemberID AND DateReturned IS NULL;
+  END IF;
+    IF v_total_fine = 0 AND v_overdue_items = 0 THEN      
+      UPDATE Member
+      SET MemberStatus = 'REGULAR'
+      WHERE MemberID = NEW.MemberID;
+   END IF;
+END;
+//
+DELIMITER ;
+
+DELIMITER //
+DROP TRIGGER IF EXISTS br8_member_fine;
+//
+CREATE TRIGGER br8_member_fine
+AFTER UPDATE ON Member
+FOR EACH ROW
+BEGIN 
+	DECLARE v_total_fine DECIMAL(10, 2);
+    DECLARE v_overdue_items INT;
+    DECLARE v_status varchar(50);
+	SELECT MemberStatus  INTO v_status
+    FROM Member 
+    WHERE MemberID = NEW.MemberID;
+  IF v_status = 'SUSPENDED' THEN     
+    SELECT SUM(FineFee) INTO v_total_fine
+    FROM Member
+    WHERE MemberID = NEW.MemberID;    
+    SELECT COUNT(*) INTO v_overdue_items
+    FROM Borrowedby
+    WHERE MemberID = NEW.MemberID AND DateReturned IS NULL;
+  END IF;
+    IF v_total_fine = 0 AND v_overdue_items = 0 THEN      
+      UPDATE Member
+      SET MemberStatus = 'REGULAR'
+      WHERE MemberID = NEW.MemberID;
+   END IF;
+END;
+//
+DELIMITER ;
+
+/*To test Task 2 I will insert a new member in table Member with MemberStatus as SUSPENDED and FineFee as 50*/
+INSERT INTO Member (MemberID,MemberStatus,MemberName,MemberAddress,MemberSuburb,MemberState,MemberExpDate,MemberPhone,FineFee) 
+VALUES ('7','SUSPENDED','Fayyaz','8 Mark St','Lidcombe','NSW','2023-08-20','0434567541',50);
+select * from member;
+
+/*Now I will insert a data into borrowedby table for MemberID=7 with DateReturned will be null*/
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '4','7','2023-01-01',NULL,'2023-02-01');
+/*Now i will update the borrowedby table and add the date returned to previously added record*/
+update Borrowedby
+set Datereturned = '2023-01-20'
+where BookIssueID=9;
+select * from borrowedby;
+select * from member;
+/*the memberID 7 has returned the book but still his member status is suspended 
+because he is having fine fee, if member pays the fine fee the his status will be set to regular*/
+update Member
+set FineFee=0
+where MemberID = 7;
+select * from Member;
+
+/*Write a stored procedure to list the members that currently have an overdue item and their (individual) 
+membership has been suspended twice in the past three years. End these members’ membership by settng their 
+MemberStatus to “TERMINATED”. Error handler must be implemented to handle excepMons.*/
+/*firstly creting a table SuspensionHistory to store record of members suspension and date*/
+CREATE TABLE SuspensionHistory(
+MemberID INT,
+SuspensionDate DATE,
+FOREIGN KEY (MemberID) REFERENCES Member (MemberID)
+);
+/*creating a trigger to add data to suspension history table whenever the member has been suspended
+based on business rules*/
+DELIMITER //
+DROP TRIGGER IF EXISTS suspension;
+//
+CREATE TRIGGER suspension
+AFTER UPDATE ON Member
+FOR EACH ROW
+BEGIN
+    DECLARE v_status varchar(50);
+    DECLARE v_id int;
+    SELECT MemberStatus  INTO v_status
+    FROM Member 
+    WHERE MemberID = NEW.MemberID;
+
+    IF v_status = 'SUSPENDED' THEN
+		SELECT MemberID  INTO v_id
+		FROM Member 
+		WHERE MemberID = NEW.MemberID;
+
+        
+        INSERT INTO SuspensionHistory (MemberID, SuspensionDate)
+        VALUES (v_id, CURDATE()); 
+	END IF;
+END;
+//
+DELIMITER ;
+
+/*finally created a stored procedure with error handler*/
+DROP PROCEDURE IF EXISTS TerminatedMember;
+
+DELIMITER //
+CREATE PROCEDURE TerminatedMember()
+  BEGIN
+    DECLARE v_finished INT DEFAULT 0;
+    DECLARE v_id INT;
+        
+    DECLARE terminate_cursor CURSOR FOR
+		SELECT t1.MemberID
+		FROM SuspensionHistory as t1
+		JOIN Borrowedby as t2 ON t1.MemberID = t2.MemberID
+		WHERE t1.SuspensionDate >= DATE_SUB(CURDATE(), INTERVAL 3 YEAR) 
+		AND t2.DateReturned IS NULL
+		AND t2.ReturnDueDate < CURDATE()
+		GROUP BY t1.MemberID
+		HAVING COUNT(*) >= 2;    
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_finished = 1;    
+    OPEN terminate_cursor;    
+		REPEAT
+			FETCH terminate_cursor INTO v_id;
+				IF  v_finished = 0 THEN
+					UPDATE Member  
+					SET MemberStatus = 'TERMINATED'
+					WHERE MemberID = v_id;
+				END IF;
+		UNTIL v_finished
+		END REPEAT;    
+	CLOSE terminate_cursor;
+    
+  END //
+DELIMITER ;
+
+/*we will insert the following data to test*/
+SELECT * FROM HOLDING;
+#to test trigger for BR4 first i have inserted values in holding table
+INSERT INTO Holding (BranchID,BookID,InStock,OnLoan) 
+VALUES ('2', '5','10','1');
+INSERT INTO Member (MemberID,MemberStatus,MemberName,MemberAddress,MemberSuburb,MemberState,MemberExpDate,MemberPhone) 
+VALUES ('7','REGULAR','Fayyaz','4 XYZ St','Lidcome','NSW','2024-01-01','0434567811');
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('2', '5','7','2023-08-10',NULL,'2023-08-30');
+
+
+/* we will the following code multple times so that the memberid 7 will be susapended multiple time 
+and suspension is recorded in suspension history table*/
+UPDATE Member
+set FineFee= FineFee+45
+where MemberID = 7;
+update member
+set FineFee= 10
+where MemberID = 7;
+/* the member status has been updated to SUSPENDED*/
+select * from member;
+select * from suspensionhistory;
+
+/*before calling the stored procedure we need drop procedures that will update memberstatus based on businnes rules
+beacuse we just want set status of member as terminated who currently have an overdue item and their (individual) 
+membership has been suspended twice in the past three years*/
+DROP TRIGGER IF EXISTS suspension;
+DROP TRIGGER IF EXISTS br8_member_fine;
+DROP TRIGGER IF EXISTS br8_borrowedby;
+DROP TRIGGER IF EXISTS br7;
+DROP TRIGGER IF EXISTS br6;
+
+/*running stored procedure TerminatedMember*/
+CALL TerminatedMember();
+SELECT MemberID FROM Member WHERE MemberStatus = 'TERMINATED';
+/*we can see stored procedure is executed succesfully and set membertstatus as TERMINATED for memberid 5*/
+select * from member;
+
+desc member;
+
+ALTER TABLE Member MODIFY MemberStatus CHAR(11);
 
