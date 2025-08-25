@@ -1,0 +1,331 @@
+use library;
+
+# BR1. Any book can be borrowed if and only if at least one copy of the book is being holding at the branch. 
+select * from holding;
+
+DELIMITER //
+DROP TRIGGER IF EXISTS br1;
+CREATE TRIGGER br1
+  BEFORE INSERT ON Borrowedby
+  FOR EACH ROW 
+  BEGIN
+    DECLARE msg VARCHAR(255);
+    DECLARE v_stock INT DEFAULT 0;
+
+    
+    SET v_stock = (SELECT InStock - OnLoan
+                   FROM Holding
+                   WHERE BranchID = NEW.BranchID AND BookID = NEW.BookID);
+
+    
+    IF v_stock <= 0 THEN
+      SET msg = "Book is out of stock";
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+  END;
+//
+DELIMITER ;
+
+/*To test the trigger created for BR1 I have inserted data into holding table 
+where OnStock and OnLoan vlaues are same, which means the books in branch books borrowed are same i.e., 0 books in stock*/
+insert into holding values('1','4','2','2');
+ select * from holding;           
+/* when I try to insert row in borrowedby table with BranchID=1 and BookID=4, 
+trigger will be activated as Book is out of stock*/
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('1', '4','2','2022-05-01',NULL,'2022-05-10');      
+
+
+
+# BR2. Only members with “REGULAR” member status can borrow books.
+
+select * from member;
+select * from Borrowedby;
+DELIMITER //
+DROP TRIGGER IF EXISTS br2;
+CREATE TRIGGER br2
+  BEFORE INSERT ON Borrowedby
+  FOR EACH ROW
+  BEGIN
+    DECLARE msg VARCHAR(255);
+    DECLARE v_status VARCHAR(50);
+    
+    SELECT MemberStatus INTO v_status
+    FROM Member
+    WHERE Member.MemberID = NEW.MemberID;
+
+    IF v_status <> "REGULAR" THEN
+      SET msg = "This member cannot borrow a book";
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+  END;
+//
+DELIMITER ;
+
+
+select MemberID,MemberStatus from Member where MemberStatus != "REGULAR";
+/*To test the trigger created for BR2 I tried inserting a row in Borrowedby with MemberID=6
+ whose Mmber status is SUSPENDED, trigger will be activated with message: This memeber cannot borrow a book.*/
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '5','6','2020-01-01',NULL,'2020-02-01');
+
+# BR3. Each member can borrow one copy of the same book on the same day 
+
+DELIMITER //
+DROP TRIGGER IF EXISTS br3;
+CREATE TRIGGER br3
+  BEFORE INSERT ON Borrowedby
+  FOR EACH ROW
+  BEGIN
+    DECLARE msg VARCHAR(255);
+    DECLARE v_count INT;
+    SELECT COUNT(*) INTO v_count
+    FROM Borrowedby
+    WHERE MemberID = NEW.MemberID
+      AND BookID = NEW.BookID
+      AND DateBorrowed = NEW.DateBorrowed;
+
+    IF v_count > 0 THEN
+      SET msg = "This member cannot borrow the same book on the same day";
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+    END IF;
+    
+  END;
+//
+DELIMITER ;
+
+
+
+select * from Borrowedby;
+/*To test the trigger created for BR3 I tried inserting a row in Borrowedby with values
+ BookID=2, MemberID=2 and Date=2020-08-30, this book has already been borrowed by same member on same day,
+ trigger will be activated with message: This memeber cannot borrow the same book on same day.*/
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('1', '2','2','2020-08-30',NULL,'2020-09-30');
+
+# BR4. A member can borrow up to 5 items for 3 weeks (i.e., 21 days).
+DROP TRIGGER IF EXISTS br4;
+DELIMITER //
+
+CREATE TRIGGER br4
+  BEFORE INSERT ON Borrowedby
+  FOR EACH ROW
+  BEGIN
+    DECLARE msg VARCHAR(255);
+    DECLARE v_count INT;
+    DECLARE v_date DATE;
+    DECLARE days_difference INT;
+    DECLARE days date;
+    
+    
+    
+    SELECT MIN(DateBorrowed) INTO v_date
+    FROM Borrowedby
+    WHERE MemberID = NEW.MemberID;
+	
+    IF v_date IS NOT NULL THEN
+      set days = DATE_ADD(v_date, INTERVAL 21 DAY);
+      if NEW.DateBorrowed < days then
+      
+		SELECT COUNT(*) INTO v_count
+		FROM Borrowedby
+		WHERE MemberID = NEW.MemberID
+		AND DateBorrowed BETWEEN v_date AND DATE_ADD(v_date, INTERVAL 21 DAY);
+
+		IF v_count >= 5 then
+			SET msg = "This member has reached the maximum limit of 5 items within 21 days";
+			SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+      END IF;
+    END IF;
+   End if;
+  END;
+//
+DELIMITER ;
+
+#to test trigger for BR4 first i have inserted values in holding table
+INSERT INTO Holding (BranchID,BookID,InStock,OnLoan) 
+VALUES ('3', '1','7','1');
+# Now i started inserting 5 rows in borrowedby table with memberID=4
+
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '1','5','2020-01-01',NULL,'2020-01-30');
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '1','5','2020-01-03',NULL,'2020-01-30');
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '1','5','2020-01-05',NULL,'2020-01-30');
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '1','5','2020-01-07',NULL,'2020-01-30');
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '1','5','2020-01-09',NULL,'2020-01-30');
+
+/*when i try to insert 5th row in Borrwedby table with same memberId=5 and date less then 21 days from the earliest date book
+borrowed, triger is activated with message This member has reached the maximum limit of 5 items within 21 days*/
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('3', '1','5','2020-01-11',NULL,'2020-01-30');
+
+
+# BR5. The return due date of the borrowed book cannot be past the membership expiry date.
+
+DELIMITER //
+DROP TRIGGER IF EXISTS br5;
+CREATE TRIGGER br5
+  BEFORE INSERT ON Borrowedby
+  FOR EACH ROW
+  BEGIN
+    DECLARE msg VARCHAR(255);
+    DECLARE v_date DATE;
+       
+    SELECT MemberExpDate INTO v_date
+    FROM Member
+    WHERE MemberID = NEW.MemberID;
+    
+    IF New.ReturnDueDate > v_date  then
+        SET msg = "The due date for returning the borrowed book has exceeded the expiration date of the membership.";
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = msg;
+      
+    END IF;
+  END;
+//
+DELIMITER ;
+
+# BR 5
+/* to  with test trigger for BR5 I tried to insert a row in borrowedby table for memberId=1
+with return date '2021-10-10' which exceeds the members expiry date '2021-09-30'
+trigger will be activated with message:
+ The due date for returning the borrowed book has exceeded the expiration date of the membership. */ 
+INSERT INTO Borrowedby (BranchID,BookID,MemberID,DateBorrowed,DateReturned,ReturnDueDate)
+VALUES ('1', '3','1','2020-10-11',NULL,'2021-10-10');
+
+
+# BR6. If a member has an outstanding fee* and it has reached $30, his/her membership will be suspended.
+DELIMITER //
+DROP TRIGGER IF EXISTS br6;
+//
+
+CREATE TRIGGER br6
+  BEFORE UPDATE ON Member
+  FOR EACH ROW
+  BEGIN
+       
+    IF NEW.FineFee < 30 THEN
+      SET NEW.MemberStatus = "REGULAR";
+      SET @action = 'update';
+	else
+      SET NEW.MemberStatus = "SUSPENDED";
+      SET @action = 'update';
+    END IF;
+  END;
+//
+DELIMITER ;
+select * from member;
+
+# BR 6 
+/* To test error handler for BR6*/
+select * from member;
+/* MemberId=2 has status RGULAR and FineFee 0, i will add finefee of 45*/
+
+update member
+set FineFee= FineFee+45
+where MemberID = 2;
+/* the member status has been updated to SUSPENDED*/
+select * from member;
+
+/*if i fine less then 30*/
+update member
+set FineFee= 10
+where MemberID = 2;
+/*Member status is uodated to REGULAR*/
+select * from member;
+
+/* BR7. If a member has an overdue item, his/her fine fee will be increased $2/day passing the expiration date and 
+ the membership will be suspended.*/
+DELIMITER //
+DROP TRIGGER IF EXISTS br7;
+//
+CREATE TRIGGER br7
+BEFORE UPDATE ON Borrowedby
+FOR EACH ROW
+BEGIN
+    DECLARE v_due_date DATE;
+    DECLARE v_returned_date DATE;
+    DECLARE v_overdue_days INT;
+    DECLARE v_fine_amount DECIMAL(10, 2) DEFAULT 0;
+    DECLARE v_days INT;
+    DECLARE v_member_exp_date DATE; 
+   
+    SET v_due_date = NEW.ReturnDueDate;
+    SET v_returned_date = NEW.DateReturned;
+    
+    
+    SELECT MemberExpDate INTO v_member_exp_date FROM Member WHERE MemberID = NEW.MemberID;
+    
+    
+    SET v_days = DATEDIFF(v_member_exp_date, NEW.ReturnDueDate);
+
+    
+    IF v_returned_date IS NOT NULL THEN
+        SET v_overdue_days = DATEDIFF(v_returned_date, v_due_date);
+    ELSE
+        SET v_overdue_days = DATEDIFF(CURDATE(), v_due_date);
+    END IF;
+
+   if v_overdue_days > 0 then
+    SET v_fine_amount = v_overdue_days * 2;
+    
+   end if;
+   
+    UPDATE Member
+    SET FineFee = FineFee + v_fine_amount
+    WHERE MemberID = NEW.MemberID;
+    
+    
+    IF  v_days < v_overdue_days THEN
+        UPDATE Member
+        SET MemberStatus = 'SUSPENDED'
+        WHERE MemberID = NEW.MemberID;
+	END IF;
+END;
+//
+DELIMITER ;
+
+select * from member;
+select * from Borrowedby;
+desc  borrowedby;
+INSERT INTO Borrowedby 
+VALUES (11, 1, 2, 3, '2019-12-20', NULL, '2020-02-29');
+
+select * from branch;
+Select * from book;
+select * from holding;
+/* to test trigger for BR7 i will first update the boorowedby row with BookIssueID = 11 and MemberID=5
+here the member has returned the book before due date and befor his membership expiration date*/
+UPDATE Borrowedby
+SET DateReturned = '2020-01-10'
+WHERE BookIssueID = 11 and MemberID=3;
+
+select * from member;
+
+/*member table is not updated with fine and member status
+ because the member has returned the book before due date and befor his membership expiration date*/
+ 
+ /*now i will update the boorowedby row with BookIssueID = 12 and MemberID=5
+here the member has not returned the book before due date but returned before his membership expiration date**/
+ UPDATE Borrowedby
+SET DateReturned = '2020-03-10'
+WHERE BookIssueID = 11 and MemberID=3;
+ 
+ /*member table is  updated with fine
+ because the member has not returned the book before due date*/
+select * from member;
+ /*now i will update the boorowedby row with BookIssueID = 13 and MemberID=5
+here the member has not returned the book before due date and not returned before his membership expiration date**/
+ UPDATE Borrowedby
+SET DateReturned = '2021-10-01'
+WHERE BookIssueID = 11 and MemberID=3;
+ 
+ /*member table is  updated with fine fee and member status
+ because the member has not returned the book before due date and expiration date of membership*/
+select * from member;
+
+
+
